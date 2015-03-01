@@ -1,5 +1,7 @@
 import os
 from flask import Flask, render_template, session, redirect, url_for, flash
+from flask.ext.script import Manager
+from flask.ext.script import Shell
 from flask.ext.bootstrap import Bootstrap
 from flask.ext.moment import Moment
 from datetime import datetime
@@ -7,6 +9,7 @@ from flask.ext.wtf import Form
 from wtforms import StringField, SubmitField
 from wtforms.validators import Required
 from flask.ext.sqlalchemy import SQLAlchemy
+from flask.ext.migrate import Migrate, MigrateCommand
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 
@@ -17,9 +20,12 @@ app.config['SQLALCHEMY_DATABASE_URI'] =\
     'sqlite:///'+ os.path.join(basedir, 'data.sqlite')
 app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
 
+manager = Manager(app)
 bootstrap = Bootstrap(app)
 moment = Moment(app)
 db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+manager.add_command('db', MigrateCommand)
 
 # database model definition
 class Role(db.Model):
@@ -29,7 +35,7 @@ class Role(db.Model):
     name = db.Column(db.String(64), unique = True)
 
     # relationships
-    users = db.relationship('User', backref = 'role')
+    users = db.relationship('User', backref = 'role', lazy = 'dynamic')
 
     # class representation
     def __repr__(self):
@@ -46,6 +52,11 @@ class User(db.Model):
     def __repr__(self):
         return '<User %r>' % self.username
 
+# providing object to shell (if app is run from cli with [shell] option)
+def make_shell_context():
+    return dict(app=app, db=db, Role=Role, User=User)
+manager.add_command("shell", Shell(make_context=make_shell_context))
+
 class NameForm(Form):
     name = StringField('What is our name, my precious?', validators=[Required()])
     submit = SubmitField('Submit')
@@ -60,16 +71,21 @@ def internal_server_error(e):
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    name = None
     form = NameForm()
     if form.validate_on_submit():
-        old_name = session.get('name')
-        if old_name is not None and old_name != form.name.data:
-            flash('Looks like you have changed your name')
+        user = User.query.filter_by(username = form.name.data).first()
+        if user is  None:
+            user = User(username = form.name.data)
+            db.session.add(user)
+            session['known'] = False
+        else:
+            session['known'] = True
         session['name'] = form.name.data
+        form.name.data = ''
         return redirect(url_for('index'))
     return render_template('index.html', form = form,
-                            name = session.get('name'))
+                            name = session.get('name'),
+                            known = session.get('known', False))
 
 @app.route('/user/<name>')
 def user(name):
@@ -79,4 +95,4 @@ def user(name):
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    manager.run()
